@@ -52,7 +52,7 @@ impl EncodeToChunk for QuoteTick {
     }
 
     #[allow(clippy::type_complexity)]
-    fn encode(data: Vec<Self>) -> Chunk<Box<dyn Array>> {
+    fn encode(data: &[Self]) -> Chunk<Box<dyn Array>> {
         let (
             mut bid_column,
             mut ask_column,

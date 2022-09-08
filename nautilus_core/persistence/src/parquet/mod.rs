@@ -18,6 +18,7 @@ mod trade_tick;
 
 use std::collections::BTreeMap;
 use std::ffi::c_void;
+use std::slice;
 use std::{fs::File, marker::PhantomData};
 
 use arrow2::{
@@ -35,7 +36,7 @@ use arrow2::{
 use nautilus_core::cvec::CVec;
 use nautilus_core::string::pystr_to_string;
 use nautilus_model::data::tick::{QuoteTick, TradeTick};
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::PyDict;
 use pyo3::{ffi, FromPyPointer, Python};
 
 pub struct ParquetReader<A> {
@@ -78,9 +79,9 @@ pub struct ParquetWriter<A> {
     pub writer_type: PhantomData<*const A>,
 }
 
-impl<A> ParquetWriter<A>
+impl<'a, A> ParquetWriter<A>
 where
-    A: EncodeToChunk,
+    A: EncodeToChunk + 'a,
 {
     pub fn new(path: &str, schema: Schema) -> Self {
         let options = WriteOptions {
@@ -106,7 +107,7 @@ where
 
     pub fn write_bulk<I>(&mut self, data_stream: I) -> Result<()>
     where
-        I: Iterator<Item = Vec<A>>,
+        I: Iterator<Item = &'a [A]>,
     {
         let chunk_stream = data_stream.map(|chunk| Ok(A::encode(chunk)));
         let row_groups = RowGroupIterator::try_new(
@@ -123,7 +124,7 @@ where
         Ok(())
     }
 
-    pub fn write(&mut self, data: Vec<A>) -> Result<()> {
+    pub fn write(&mut self, data: &[A]) -> Result<()> {
         let cols = A::encode(data);
         let iter = vec![Ok(cols)];
         let row_groups = RowGroupIterator::try_new(
@@ -157,52 +158,12 @@ where
 {
     fn encodings(metadata: BTreeMap<String, String>) -> Vec<Vec<Encoding>>;
     fn encode_schema(metadata: BTreeMap<String, String>) -> Schema;
-    fn encode(data: Vec<Self>) -> Chunk<Box<dyn Array>>;
+    fn encode(data: &[Self]) -> Chunk<Box<dyn Array>>;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 // C API
 ////////////////////////////////////////////////////////////////////////////////
-#[no_mangle]
-pub unsafe extern "C" fn parquet_writer_chunk_append(
-    chunk: CVec,
-    item: *mut c_void,
-    reader_type: ParquetType,
-)
--> CVec
-{
-    let CVec { ptr, len, cap } = chunk;
-    match reader_type {
-        ParquetType::QuoteTick => {
-            let mut data: Vec<QuoteTick> = Vec::from_raw_parts(ptr as *mut QuoteTick, len, cap);
-            let item = Box::from_raw(item as *mut QuoteTick);
-            data.push(*item);
-            CVec::from(data)
-        },
-        ParquetType::TradeTick => todo!(),
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn parquet_writer_write(
-    writer: *mut c_void,
-    writer_type: ParquetType,
-    data: *mut ffi::PyObject
-) {
-    println!("parquet_writer_write");
-    match writer_type {
-        ParquetType::QuoteTick => {
-            let writer = Box::from_raw(writer as *mut ParquetWriter<QuoteTick>);
-            Python::with_gil(|py| {
-                
-                let data = PyList::from_borrowed_ptr(py, data);
-                // TODO extract
-
-            })
-        }
-        ParquetType::TradeTick => todo!()
-    }
-}
 
 /// Types that implement parquet reader writer traits should also have a
 /// corresponding enum so that they can be passed across the ffi.
@@ -210,6 +171,51 @@ pub unsafe extern "C" fn parquet_writer_write(
 pub enum ParquetType {
     QuoteTick = 0,
     TradeTick = 1,
+}
+
+#[no_mangle]
+/// TODO: is this needed?
+pub unsafe extern "C" fn parquet_writer_chunk_append(
+    chunk: CVec,
+    item: *mut c_void,
+    reader_type: ParquetType,
+) -> CVec {
+    let CVec { ptr, len, cap } = chunk;
+    match reader_type {
+        ParquetType::QuoteTick => {
+            let mut data: Vec<QuoteTick> = Vec::from_raw_parts(ptr as *mut QuoteTick, len, cap);
+            let item = Box::from_raw(item as *mut QuoteTick);
+            data.push(*item);
+            CVec::from(data)
+        }
+        ParquetType::TradeTick => todo!(),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// - Assumes `writer` is a valid `*mut ParquetWriter<Struct>` where the struct
+/// has a corresponding ParquetType enum.
+/// - Assumes  `data` is a non-null valid pointer to a contiguous block of
+/// C-style structs with `len` number of elements
+pub unsafe extern "C" fn parquet_writer_write(
+    writer: *mut c_void,
+    writer_type: ParquetType,
+    data: *mut c_void,
+    len: usize,
+) {
+    println!("parquet_writer_write");
+    match writer_type {
+        ParquetType::QuoteTick => {
+            let mut writer = Box::from_raw(writer as *mut ParquetWriter<QuoteTick>);
+            let data: &[QuoteTick] = slice::from_raw_parts(data as *const QuoteTick, len);
+            // TODO: handle errors better
+            let _ = writer.write(data).expect("Could not write data to file");
+            // Leak writer value back otherwise it will be dropped after this function
+            Box::into_raw(writer);
+        }
+        ParquetType::TradeTick => todo!(),
+    }
 }
 
 /// # Safety

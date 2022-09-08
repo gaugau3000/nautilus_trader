@@ -54,7 +54,7 @@ impl EncodeToChunk for TradeTick {
     }
 
     #[allow(clippy::type_complexity)]
-    fn encode(data: Vec<Self>) -> Chunk<Box<dyn Array>> {
+    fn encode(data: &[Self]) -> Chunk<Box<dyn Array>> {
         let (
             mut price_column,
             mut size_column,
